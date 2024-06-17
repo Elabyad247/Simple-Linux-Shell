@@ -39,3 +39,9 @@
 
 # Ignore all temporary files
 *~
+
+warm-up/
+
+.gitignore
+
+shell
