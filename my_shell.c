@@ -38,6 +38,10 @@ char **tokenize(char *line) {
 pid_t background_pids[MAX_NUM_TOKENS];
 int background_count = 0;
 pid_t current_pid = -1;
+int in_parallel_mode = 0;
+int interrupted = 0;
+pid_t parallel_pids[MAX_NUM_TOKENS];
+int parallel_count = 0;
 
 void reap_background_processes() {
     pid_t pid;
@@ -63,6 +67,13 @@ void terminate_background_processes() {
     background_count = 0;
 }
 
+void terminate_parallel_processes() {
+    for (int i = 0; i < parallel_count; i++) {
+        kill(parallel_pids[i], SIGKILL);
+    }
+    parallel_count = 0;
+}
+
 void free_tokens(char **tokens) {
     for (int i = 0; tokens[i] != NULL; i++) {
         free(tokens[i]);
@@ -71,9 +82,90 @@ void free_tokens(char **tokens) {
 }
 
 void sigint_handler(int signum) {
+    interrupted = 1;
     if (current_pid != -1) {
         kill(-current_pid, SIGKILL);
+        current_pid = -1;
     }
+    if (in_parallel_mode) {
+        terminate_parallel_processes();
+    }
+}
+
+void execute_command(char **tokens, int background) {
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("Shell: Fork failed");
+    } else if (pid == 0) {
+        setpgid(0, 0); // Set the process group ID to the PID of the child process
+        if (execvp(tokens[0], tokens) == -1) {
+            perror("Shell: Command not found");
+            exit(EXIT_FAILURE);
+        }
+    } else {
+        if (!background) {
+            current_pid = pid;
+            setpgid(pid, pid); // Set the process group ID to the PID of the child process
+            waitpid(pid, NULL, 0); // Wait for the foreground process to finish
+            current_pid = -1;
+        } else {
+            background_pids[background_count++] = pid;
+        }
+    }
+}
+
+char ***parse_commands(char *line, const char *delimiter) {
+    char ***commands = (char ***) malloc(MAX_NUM_TOKENS * sizeof(char **));
+    char **tokens = tokenize(line); // Tokenize the input line
+    int commandIndex = 0;
+    int tokenIndex = 0;
+    commands[commandIndex] = (char **) malloc(MAX_NUM_TOKENS * sizeof(char *)); // Allocate memory for the command
+    for (int i = 0; tokens[i] != NULL; i++) {
+        if (strcmp(tokens[i], delimiter) == 0) { // Check if the token is the delimiter
+            commands[commandIndex][tokenIndex] = NULL; // Terminate the command with NULL
+            commands[++commandIndex] = (char **) malloc(MAX_NUM_TOKENS * sizeof(char *));
+            tokenIndex = 0;
+        } else {
+            commands[commandIndex][tokenIndex++] = tokens[i]; // Add the token to the current command
+        }
+    }
+    commands[commandIndex][tokenIndex] = NULL;
+    commands[commandIndex + 1] = NULL;
+    free(tokens);
+    return commands;
+}
+
+void execute_serial_commands(char ***commands) {
+    for (int i = 0; commands[i] != NULL; i++) {
+        if (interrupted) {
+            break;
+        }
+        execute_command(commands[i], 0);
+    }
+}
+
+void execute_parallel_commands(char ***commands) {
+    in_parallel_mode = 1;
+    parallel_count = 0; // Reset parallel count
+    for (int i = 0; commands[i] != NULL; i++) {
+        pid_t pid = fork();
+        if (pid < 0) {
+            perror("Shell: Fork failed");
+        } else if (pid == 0) {
+            setpgid(0, 0); // Put the child in a new process group
+            if (execvp(commands[i][0], commands[i]) == -1) { // Execute the command
+                perror("Shell: Command not found");
+                exit(EXIT_FAILURE);
+            }
+        } else {
+            parallel_pids[parallel_count++] = pid;
+        }
+    }
+    for (int i = 0; i < parallel_count; i++) {
+        waitpid(parallel_pids[i], NULL, 0); // Wait for each parallel process to finish
+    }
+    parallel_count = 0;
+    in_parallel_mode = 0;
 }
 
 int main(int argc, char *argv[]) {
@@ -88,7 +180,10 @@ int main(int argc, char *argv[]) {
     sigaction(SIGINT, &sa, NULL); // Register the signal handler
 
     while (1) {
-        reap_background_processes(); // Check and reap background processes
+        interrupted = 0;
+        if (background_count > 0) { // Check if there are any background processes
+            reap_background_processes();
+        }
         /* BEGIN: TAKING INPUT */
         bzero(line, sizeof(line));
         printf("$ ");
@@ -108,59 +203,38 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        // Handle commands
-        if (strcmp(tokens[0], "cd") == 0) {
-            if (tokens[1] != NULL) { // Check if the directory is provided
-                if (chdir(tokens[1]) != 0) {
-                    printf("Error: Directory not found\n");
-                }
-            } else {
-                printf("Shell: Incorrect command\n");
-            }
-        } else if (strcmp(tokens[0], "exit") == 0) {
-            terminate_background_processes(); // Terminate all background processes
-            free_tokens(tokens);
-            break;
+        if (strstr(line, "&&&") != NULL) {
+            char ***commands = parse_commands(line, "&&&");
+            execute_parallel_commands(commands);
+            free(commands);
+        } else if (strstr(line, "&&") != NULL) {
+            char ***commands = parse_commands(line, "&&");
+            execute_serial_commands(commands);
+            free(commands);
         } else {
-            int background = 0;
-            int tokenCount = 0;
-            while (tokens[tokenCount] != NULL) {
-                tokenCount++;
-            }
-            if (strcmp(tokens[tokenCount - 1], "&") == 0) {
-                background = 1;
-                tokens[tokenCount - 1] = NULL; // Remove the '&' token
-            }
-
-            pid_t pid = fork();
-            if (pid < 0) {
-                printf("Shell: Fork failed\n");
-            } else if (pid == 0) {
-                setpgid(0, 0); // Set the process group ID to the PID of the child process
-                if (strcmp(tokens[0], "sleep") == 0) { // Handle sleep command separately for testing
-                    if (tokens[1] != NULL) {
-                        sleep(atoi(tokens[1]));
-                    } else {
-                        printf("Shell: Incorrect command\n");
+            if (strcmp(tokens[0], "cd") == 0) {
+                if (tokens[1] != NULL) { // Check if the directory is provided
+                    if (chdir(tokens[1]) != 0) {
+                        perror("Shell: Directory not found");
                     }
-                    exit(0);
                 } else {
-                    if (execvp(tokens[0], tokens) == -1) { // Execute the command
-                        printf("Error: Command not found\n");
-                        exit(EXIT_FAILURE);
-                    }
+                    perror("Shell: Incorrect command");
                 }
+            } else if (strcmp(tokens[0], "exit") == 0) {
+                terminate_background_processes(); // Terminate all background processes
+                free_tokens(tokens);
+                break;
             } else {
-                if (!background) {
-                    current_pid = pid;
-                    setpgid(pid, pid); // Set the process group ID to the PID of the child process
-                    waitpid(pid, NULL, 0); // Wait for the foreground process to finish
-                    current_pid = -1;
-                } else {
-                    //Sleep for 0.25 second to allow the background process to start
-                    usleep(250000);
-                    background_pids[background_count++] = pid;
+                int background = 0;
+                int tokenCount = 0;
+                while (tokens[tokenCount] != NULL) {
+                    tokenCount++;
                 }
+                if (strcmp(tokens[tokenCount - 1], "&") == 0) {
+                    background = 1;
+                    tokens[tokenCount - 1] = NULL; // Remove the '&' token
+                }
+                execute_command(tokens, background);
             }
         }
 
