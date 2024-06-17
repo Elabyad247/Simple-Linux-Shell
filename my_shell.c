@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <signal.h>
 
 #define MAX_INPUT_SIZE 1024
 #define MAX_TOKEN_SIZE 64
@@ -36,7 +37,7 @@ char **tokenize(char *line) {
 
 pid_t background_pids[MAX_NUM_TOKENS];
 int background_count = 0;
-
+pid_t current_pid = -1;
 
 void reap_background_processes() {
     pid_t pid;
@@ -69,10 +70,22 @@ void free_tokens(char **tokens) {
     free(tokens);
 }
 
+void sigint_handler(int signum) {
+    if (current_pid != -1) {
+        kill(-current_pid, SIGKILL);
+    }
+}
+
 int main(int argc, char *argv[]) {
     char line[MAX_INPUT_SIZE];
     char **tokens;
     int i;
+
+    struct sigaction sa;
+    sa.sa_handler = sigint_handler; // Set the signal handler
+    sigemptyset(&sa.sa_mask); // Clear the signal mask
+    sa.sa_flags = SA_RESTART; // Restart the system call if possible
+    sigaction(SIGINT, &sa, NULL); // Register the signal handler
 
     while (1) {
         reap_background_processes(); // Check and reap background processes
@@ -123,8 +136,13 @@ int main(int argc, char *argv[]) {
             if (pid < 0) {
                 printf("Shell: Fork failed\n");
             } else if (pid == 0) {
+                setpgid(0, 0); // Set the process group ID to the PID of the child process
                 if (strcmp(tokens[0], "sleep") == 0) { // Handle sleep command separately for testing
-                    sleep(5);
+                    if (tokens[1] != NULL) {
+                        sleep(atoi(tokens[1]));
+                    } else {
+                        printf("Shell: Incorrect command\n");
+                    }
                     exit(0);
                 } else {
                     if (execvp(tokens[0], tokens) == -1) { // Execute the command
@@ -134,7 +152,10 @@ int main(int argc, char *argv[]) {
                 }
             } else {
                 if (!background) {
+                    current_pid = pid;
+                    setpgid(pid, pid); // Set the process group ID to the PID of the child process
                     waitpid(pid, NULL, 0); // Wait for the foreground process to finish
+                    current_pid = -1;
                 } else {
                     //Sleep for 0.25 second to allow the background process to start
                     usleep(250000);
