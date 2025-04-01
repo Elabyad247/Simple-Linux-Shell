@@ -1,8 +1,8 @@
-# Simple Linux Shell
+# Unix Shell
 
 ## Overview
 
-This project is a custom implementation of a simple Linux shell, designed to execute user commands similarly to the bash shell. The shell supports basic command execution, background process handling, signal management, and both serial and parallel command execution.
+This project is a custom implementation of a simple unix shell, designed to execute user commands similarly to the bash shell. The shell supports basic command execution, background process handling, signal management, and both serial and parallel command execution.
 
 ## Features
 
@@ -18,7 +18,7 @@ This project is a custom implementation of a simple Linux shell, designed to exe
 ### Prerequisites
 
 - GCC compiler
-- Unix-like operating system (Linux)
+- Unix based operating system (Linux)
 
 ### Running the Shell
 
